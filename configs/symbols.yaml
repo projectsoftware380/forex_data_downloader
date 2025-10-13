@@ -1,0 +1,13 @@
+# Pips y formatos por símbolo (extensible)
+EURUSD:
+  pip_decimal: 0.0001
+  digits: 5
+GBPUSD:
+  pip_decimal: 0.0001
+  digits: 5
+USDJPY:
+  pip_decimal: 0.01
+  digits: 3
+XAUUSD:
+  pip_decimal: 0.1
+  digits: 2

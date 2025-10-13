@@ -1,0 +1,20 @@
+typer==0.12.3
+pandas==2.2.2
+numpy==1.26.4
+pyarrow==16.1.0
+fastparquet==2024.5.0
+pydantic==2.7.1
+pydantic-settings==2.3.1
+python-dateutil==2.9.0.post0
+tzdata==2024.1
+tqdm==4.66.4
+loguru==0.7.2
+tenacity==8.2.3
+requests==2.32.3
+# Opcional para descargar/decodificar bi5 de Dukascopy
+duka==0.2.0
+pyyaml==6.0.1
+# Dev
+ruff==0.4.2
+black==24.4.2
+pre-commit==3.7.1

@@ -1,0 +1,9 @@
+version: "3.9"
+services:
+  fxd:
+    build: ../
+    volumes:
+      - ../data:/app/data
+    environment:
+      - FXD_DATA_ROOT=/app/data
+    command: ["python","-m","forex_data.cli","--help"]

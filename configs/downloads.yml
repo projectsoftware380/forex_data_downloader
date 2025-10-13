@@ -1,0 +1,24 @@
+symbols_file: configs/symbols.yaml   # ya existe
+symbols: ["EURUSD", "GBPUSD", "USDJPY"]
+
+datasets:
+  - kind: ticks
+    start: 2024-01-01
+    end: 2024-01-10
+    out_dir: data/raw/ticks_parquet
+
+  - kind: m1
+    start: 2024-01-01
+    end: 2024-01-10
+    out_dir: data/raw/m1_parquet
+
+options:
+  timezone: "UTC"
+  concurrency: 1
+  skip_if_exists: true
+
+cli:
+  module: "forex_data.cli"
+  commands:
+    ticks: "download-ticks"
+    m1: "build-bars"

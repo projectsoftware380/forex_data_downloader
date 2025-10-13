@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "forex-data-downloader"
+version = "0.1.0"
+description = "Dukascopy FX data downloader & validator (ticks L1, 1m bars)"
+readme = "README.md"
+requires-python = ">=3.10,<3.13"
+authors = [{name="Manuel"}]
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
