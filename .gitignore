@@ -20,5 +20,7 @@ data/
 *.log
 
 # Credenciales
+
 .env
 .env.*
+.venv311/

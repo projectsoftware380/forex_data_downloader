@@ -7,3 +7,14 @@ services:
     environment:
       - FXD_DATA_ROOT=/app/data
     command: ["python","-m","forex_data.cli","--help"]
+
+  api_server:
+    build: ../
+    container_name: api_server
+    command: ["python", "-m", "src.forex_data.api_server"]
+    ports:
+      - "8500:8500"
+    volumes:
+      - ../data:/app/data
+    depends_on:
+      - redis

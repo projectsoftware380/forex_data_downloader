@@ -8,12 +8,35 @@ import sys
 import subprocess
 import shutil
 from datetime import datetime, timedelta, timezone
+from typing import Optional
+import time
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 from loguru import logger
 import urllib.request
+
+from ..config import settings
+
+_TIMEFRAME_MAP = {
+    "1m": "1min",
+    "5m": "5min",
+    "15m": "15min",
+    "1h": "1H",
+    "4h": "4H",
+    "1d": "1D",
+}
+_INV_TIMEFRAME_MAP = {v: k for k, v in _TIMEFRAME_MAP.items()}
+
+
+def _resolve_timeframe(timeframe: str) -> tuple[str, str]:
+    tf = timeframe.lower()
+    if tf in _TIMEFRAME_MAP:
+        return tf, _TIMEFRAME_MAP[tf]
+    if tf in _INV_TIMEFRAME_MAP:
+        return _INV_TIMEFRAME_MAP[tf], tf
+    raise ValueError(f"Timeframe no soportado: {timeframe}")
 
 
 # ------------------------------ Utilidades ------------------------------
@@ -81,7 +104,13 @@ def _fetch_bi5_hour(symbol: str, dt_utc: datetime) -> pd.DataFrame | None:
 
     buf = io.BytesIO(dec)
     unpack = struct.Struct(">iiiii").unpack  # big-endian: ms, ask, bid, askVol, bidVol
-    midnight = datetime(dt_utc.year, dt_utc.month, dt_utc.day, tzinfo=timezone.utc)
+    if dt_utc.tzinfo is None:
+        dt_utc = dt_utc.replace(tzinfo=timezone.utc)
+    else:
+        dt_utc = dt_utc.astimezone(timezone.utc)
+
+    hour_start = dt_utc.replace(minute=0, second=0, microsecond=0)
+    base_epoch_ms = int(hour_start.timestamp() * 1000)
     scale = _price_scale(symbol)
 
     rows = []
@@ -90,8 +119,8 @@ def _fetch_bi5_hour(symbol: str, dt_utc: datetime) -> pd.DataFrame | None:
         if len(chunk) < rec_size:
             break
         ms, ask_i, bid_i, askv_i, bidv_i = unpack(chunk)
-        ts = midnight + timedelta(milliseconds=ms)
-        rows.append((int(ts.timestamp()), bid_i / scale, ask_i / scale, bidv_i, askv_i))
+        ts_ms = base_epoch_ms + ms
+        rows.append((ts_ms, bid_i / scale, ask_i / scale, bidv_i, askv_i))
 
     if not rows:
         return None
@@ -101,10 +130,25 @@ def _fetch_bi5_hour(symbol: str, dt_utc: datetime) -> pd.DataFrame | None:
 def _range_hours(start: datetime, end: datetime):
     """
     Generador de horas UTC [start, end) con paso de 1h.
-    start/end son fechas sin tz -> las tratamos como UTC a medianoche.
+    Respeta hora/tz originales; se redondea start hacia abajo y end hacia arriba.
     """
-    cur = datetime(start.year, start.month, start.day, tzinfo=timezone.utc)
-    stop = datetime(end.year, end.month, end.day, tzinfo=timezone.utc)
+    if start.tzinfo is None:
+        start = start.replace(tzinfo=timezone.utc)
+    else:
+        start = start.astimezone(timezone.utc)
+    if end.tzinfo is None:
+        end = end.replace(tzinfo=timezone.utc)
+    else:
+        end = end.astimezone(timezone.utc)
+
+    if start >= end:
+        return
+
+    cur = start.replace(minute=0, second=0, microsecond=0)
+    stop = end.replace(minute=0, second=0, microsecond=0)
+    if end > stop:
+        stop += timedelta(hours=1)
+
     while cur < stop:
         yield cur
         cur += timedelta(hours=1)
@@ -153,6 +197,7 @@ def download_ticks(symbol: str, start: datetime, end: datetime, out_dir: Path, t
     # Unificar cualquier CSV que haya dejado duka (ignorando los vacíos)
     dfs: list[pd.DataFrame] = []
     csv_files = sorted(p for p in run_dir.glob("*.csv"))
+    non_empty_partials: list[Path] = []
     for fp in csv_files:
         try:
             tmp = pd.read_csv(fp)
@@ -161,6 +206,10 @@ def download_ticks(symbol: str, start: datetime, end: datetime, out_dir: Path, t
             continue
         if tmp.empty or len(tmp.columns) == 0:
             logger.warning(f"Empty CSV {fp.name} (skipping)")
+            try:
+                fp.unlink()
+            except Exception as unlink_err:
+                logger.debug(f"No se pudo eliminar {fp}: {unlink_err!r}")
             continue
 
         tmp = tmp.rename(columns={c: c.lower() for c in tmp.columns})
@@ -178,7 +227,7 @@ def download_ticks(symbol: str, start: datetime, end: datetime, out_dir: Path, t
             if ts.isna().all():
                 logger.warning(f"{fp.name} tiene tiempos no parseables (skipping)")
                 continue
-            tmp["ts_utc"] = (ts.astype("int64") // 10**9).astype("int64")
+            tmp["ts_utc"] = (ts.view("int64") // 10**6).astype("int64")
 
         if not {"bid", "ask"}.issubset(tmp.columns):
             logger.warning(f"{fp.name} no tiene bid/ask (skipping)")
@@ -192,17 +241,32 @@ def download_ticks(symbol: str, start: datetime, end: datetime, out_dir: Path, t
         if "quality_flag" not in tmp.columns:
             tmp["quality_flag"] = 0
         tmp["symbol"] = symbol
+        non_empty_partials.append(fp)
 
         dfs.append(tmp[["ts_utc", "bid", "ask", "bid_vol", "ask_vol", "symbol", "quality_flag"]])
 
     if dfs:
-        full = pd.concat(dfs, axis=0, ignore_index=True).sort_values("ts_utc")
+        full = pd.concat(dfs, axis=0, ignore_index=True, sort=False).sort_values("ts_utc")
         full.to_csv(out_csv, index=False)
-        logger.info(f"Ticks unificados en {out_csv}")
+        total_rows = len(full)
+        logger.info(f"Consolidated {total_rows:,} ticks into {out_csv}")
+        for fp in non_empty_partials:
+            if fp.exists():
+                try:
+                    fp.unlink()
+                except Exception as unlink_err:
+                    logger.debug(f"No se pudo eliminar {fp}: {unlink_err!r}")
         return out_csv
 
+    for fp in csv_files:
+        if fp.exists():
+            try:
+                fp.unlink()
+            except Exception as unlink_err:
+                logger.debug(f"No se pudo eliminar {fp}: {unlink_err!r}")
+
     logger.warning(
-        "No se pudo extraer ningún tick válido del CLI. Intentando fallback directo (datafeed.dukascopy.com)…"
+        "No se pudo extraer ningun tick valido del CLI. Intentando fallback directo (datafeed.dukascopy.com)..."
     )
 
     # ---------- 2) Fallback directo contra el datafeed ----------
@@ -218,22 +282,23 @@ def download_ticks(symbol: str, start: datetime, end: datetime, out_dir: Path, t
         frames.append(dfh)
 
     if not frames:
-        # como último recurso, escribimos CSV vacío con esquema para no romper el pipeline
+        # como ultimo recurso, escribimos CSV vacio con esquema para no romper el pipeline
         empty = pd.DataFrame(
             columns=["ts_utc", "bid", "ask", "bid_vol", "ask_vol", "symbol", "quality_flag"]
         )
         empty.to_csv(out_csv, index=False)
         logger.warning(
             f"Fallback directo tampoco obtuvo datos (0/{total_hours} horas). "
-            f"Escribí CSV vacío: {out_csv}"
+            f"Escribi CSV vacio: {out_csv}"
         )
         return out_csv
 
-    full = pd.concat(frames, axis=0, ignore_index=True).sort_values("ts_utc")
+    full = pd.concat(frames, axis=0, ignore_index=True, sort=False).sort_values("ts_utc")
     full["symbol"] = symbol
     full["quality_flag"] = 0
     full.to_csv(out_csv, index=False)
     logger.info(f"Fallback OK: {ok_hours}/{total_hours} horas con datos. CSV: {out_csv}")
+    logger.info(f"Consolidated {len(full):,} ticks into {out_csv}")
     return out_csv
 
 
@@ -269,27 +334,245 @@ def load_ticks_csv(csv_path: Path, symbol: str) -> pd.DataFrame:
     df = df.sort_values("ts_utc")
     return df[["ts_utc", "bid", "ask", "bid_vol", "ask_vol", "symbol", "quality_flag"]]
 
-def ticks_to_bars_1m(ticks: pd.DataFrame) -> pd.DataFrame:
+def ticks_to_bars(ticks: pd.DataFrame, timeframe: str = "1m") -> pd.DataFrame:
     """
-    Construye OHLC 1m para BID/ASK + tick_count a partir de ticks.
+    Construye OHLC para BID/ASK + volumen y tick_count a partir de ticks.
     """
+    tf_key, freq = _resolve_timeframe(timeframe)
+
     ticks = ticks.sort_values("ts_utc").copy()
-    ticks["dt"] = pd.to_datetime(ticks["ts_utc"], unit="s", utc=True)
+    ticks["dt"] = pd.to_datetime(ticks["ts_utc"], unit="ms", utc=True)
+    ticks = ticks.set_index("dt")
 
-    bid_ohlc = ticks.set_index("dt")["bid"].resample("1min").ohlc()
-    ask_ohlc = ticks.set_index("dt")["ask"].resample("1min").ohlc()
-    tick_count = ticks.set_index("dt")["bid"].resample("1min").count().rename("tick_count")
+    bid_ohlc = ticks["bid"].resample(freq).ohlc()
+    ask_ohlc = ticks["ask"].resample(freq).ohlc()
+    tick_count = ticks["bid"].resample(freq).count().rename("tick_count")
+    bid_volume = ticks["bid_vol"].fillna(0).resample(freq).sum().rename("bid_volume")
+    ask_volume = ticks["ask_vol"].fillna(0).resample(freq).sum().rename("ask_volume")
 
-    df = pd.concat([bid_ohlc.add_prefix("bid_"), ask_ohlc.add_prefix("ask_"), tick_count], axis=1).dropna(how="any")
-    df = df.reset_index().rename(columns={"dt": "ts_open"})
-    df["ts_utc_open"] = (df["ts_open"].astype("int64") // 10**9).astype("int64")
+    df = (
+        pd.concat(
+            [
+                bid_ohlc.add_prefix("bid_"),
+                ask_ohlc.add_prefix("ask_"),
+                bid_volume,
+                ask_volume,
+                tick_count,
+            ],
+            axis=1,
+        )
+        .dropna(how="any")
+        .reset_index()
+        .rename(columns={"dt": "ts_open"})
+    )
+    df["ts_utc_open"] = (df["ts_open"].view("int64") // 10**6).astype("int64")
     df = df.drop(columns=["ts_open"])
 
-    df = df[
-        ["ts_utc_open", "bid_open", "bid_high", "bid_low", "bid_close",
-         "ask_open", "ask_high", "ask_low", "ask_close", "tick_count"]
-    ].rename(columns={
-        "bid_open": "bid_o", "bid_high": "bid_h", "bid_low": "bid_l", "bid_close": "bid_c",
-        "ask_open": "ask_o", "ask_high": "ask_h", "ask_low": "ask_l", "ask_close": "ask_c",
-    })
-    return df
+    df = df.rename(
+        columns={
+            "bid_open": "bid_o",
+            "bid_high": "bid_h",
+            "bid_low": "bid_l",
+            "bid_close": "bid_c",
+            "ask_open": "ask_o",
+            "ask_high": "ask_h",
+            "ask_low": "ask_l",
+            "ask_close": "ask_c",
+        }
+    )
+    df["timeframe"] = tf_key
+
+    columns = [
+        "ts_utc_open",
+        "bid_o",
+        "bid_h",
+        "bid_l",
+        "bid_c",
+        "ask_o",
+        "ask_h",
+        "ask_l",
+        "ask_c",
+        "bid_volume",
+        "ask_volume",
+        "tick_count",
+        "timeframe",
+    ]
+    return df[columns]
+
+
+def consolidate_final_output(
+    symbol: str,
+    start: str,
+    end: str,
+    mode: str = "ticks",
+    timeframe: Optional[str] = None,
+    remove_intermediate: bool = True,
+) -> Path:
+    """
+    Consolida datos de ticks, barras y reportes en un único Parquet final.
+    Si remove_intermediate es True, elimina directorios intermedios tras consolidar.
+    """
+    data_root = Path(settings.data_root)
+    start_key = start.replace("-", "")
+    end_key = end.replace("-", "")
+    tf_key = (timeframe or "").lower() or None
+
+    final_dir = data_root / "final" / symbol
+    final_dir.mkdir(parents=True, exist_ok=True)
+    suffix_parts = [mode]
+    if tf_key:
+        suffix_parts.append(tf_key)
+    final_name = f"{symbol}_{start_key}_{end_key}_{'_'.join(suffix_parts)}.parquet"
+    final_path = final_dir / final_name
+
+    frames: list[pd.DataFrame] = []
+
+    if mode == "ticks":
+        ticks_path = data_root / "raw" / "ticks" / symbol / f"{symbol}_{start_key}_{end_key}_ticks.csv"
+        if ticks_path.exists():
+            try:
+                ticks_df = pd.read_csv(ticks_path)
+                ticks_df["data_type"] = "ticks"
+                ticks_df["source_path"] = str(ticks_path)
+                frames.append(ticks_df)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(f"No se pudo incluir ticks de {ticks_path}: {exc}")
+
+        bars_root = data_root / "curated" / "bars_1m" / f"symbol={symbol}"
+        if bars_root.exists():
+            try:
+                bars_df = pd.read_parquet(bars_root)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(f"No se pudo leer parquet particionado en {bars_root}: {exc}")
+            else:
+                bars_df["data_type"] = "bars_1m"
+                bars_df["source_path"] = str(bars_root)
+                frames.append(bars_df)
+
+        reports_root = data_root / "reports"
+        if reports_root.exists():
+            pattern = f"{symbol}_{start_key}_{end_key}_*.csv"
+            for report_file in reports_root.glob(pattern):
+                try:
+                    report_df = pd.read_csv(report_file)
+                    report_df["data_type"] = f"report:{report_file.stem}"
+                    report_df["source_path"] = str(report_file)
+                    frames.append(report_df)
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(f"No se pudo leer reporte {report_file}: {exc}")
+    elif mode == "ohlc":
+        ohlc_root = data_root / "raw" / "ohlc" / symbol
+        if ohlc_root.exists():
+            pattern = f"{symbol}_{start_key}_{end_key}_*.csv"
+            for ohlc_file in ohlc_root.glob(pattern):
+                try:
+                    ohlc_df = pd.read_csv(ohlc_file)
+                    ohlc_df["data_type"] = f"ohlc:{ohlc_file.stem}"
+                    ohlc_df["source_path"] = str(ohlc_file)
+                    frames.append(ohlc_df)
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(f"No se pudo incluir {ohlc_file}: {exc}")
+        reports_root = data_root / "reports"
+        if reports_root.exists():
+            pattern = f"{symbol}_{start_key}_{end_key}_*.csv"
+            for report_file in reports_root.glob(pattern):
+                try:
+                    report_df = pd.read_csv(report_file)
+                    report_df["data_type"] = f"report:{report_file.stem}"
+                    report_df["source_path"] = str(report_file)
+                    frames.append(report_df)
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(f"No se pudo leer reporte {report_file}: {exc}")
+
+    if frames:
+        final_df = pd.concat(frames, ignore_index=True, sort=False)
+    else:
+        final_df = pd.DataFrame()
+
+    final_df["mode"] = mode
+    final_df["timeframe"] = tf_key
+    final_df["symbol"] = symbol
+
+    final_df.to_parquet(final_path, index=False)
+    logger.info(f"Consolidated {symbol} data into {final_path}")
+
+    if remove_intermediate and final_path.exists():
+        to_remove: list[Path] = []
+        if mode == "ticks":
+            to_remove.append(data_root / "raw" / "ticks" / symbol)
+            ticks_parquet_root = data_root / "raw" / "ticks_parquet"
+            if ticks_parquet_root.exists():
+                to_remove.extend(p for p in ticks_parquet_root.glob(f"symbol={symbol}") if p.exists())
+            bars_parquet_root = data_root / "curated" / "bars_1m"
+            if bars_parquet_root.exists():
+                to_remove.extend(p for p in bars_parquet_root.glob(f"symbol={symbol}") if p.exists())
+        elif mode == "ohlc":
+            to_remove.append(data_root / "raw" / "ohlc" / symbol)
+            to_remove.append(data_root / "raw" / "ticks" / symbol)
+
+        for path in to_remove:
+            if path.exists():
+                try:
+                    shutil.rmtree(path, ignore_errors=True)
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(f"No se pudo eliminar {path}: {exc}")
+        logger.info(f"Removed intermediate directories for {symbol} (mode={mode})")
+
+    return final_path
+
+
+def download_ohlc(
+    symbol: str,
+    start: str,
+    end: str,
+    timeframe: str,
+    remove_intermediate: bool = True,
+) -> Path:
+    """
+    Descarga datos OHLC + Volumen a partir de ticks para el símbolo y rango indicados.
+    """
+    tf_key, _ = _resolve_timeframe(timeframe)
+    start_dt = datetime.strptime(start, "%Y-%m-%d")
+    end_dt = datetime.strptime(end, "%Y-%m-%d")
+
+    data_root = Path(settings.data_root)
+    start_key = start.replace("-", "")
+    end_key = end.replace("-", "")
+
+    tick_dir = data_root / "raw" / "ticks" / symbol
+    tick_dir.mkdir(parents=True, exist_ok=True)
+
+    total_start = time.perf_counter()
+    ticks_csv = download_ticks(symbol, start_dt, end_dt, tick_dir)
+    ticks_df = load_ticks_csv(ticks_csv, symbol)
+    if ticks_df.empty:
+        logger.warning(f"No se obtuvieron ticks para {symbol} entre {start} y {end}.")
+
+    bars_df = ticks_to_bars(ticks_df, timeframe=tf_key)
+    bars_df["symbol"] = symbol
+    bars_df["mode"] = "ohlc"
+    bars_df["timeframe"] = tf_key
+
+    raw_dir = data_root / "raw" / "ohlc" / symbol
+    raw_dir.mkdir(parents=True, exist_ok=True)
+    raw_csv = raw_dir / f"{symbol}_{start_key}_{end_key}_{tf_key}.csv"
+    bars_df.to_csv(raw_csv, index=False)
+
+    final_dir = data_root / "final" / symbol
+    final_dir.mkdir(parents=True, exist_ok=True)
+    final_path = final_dir / f"{symbol}_{start_key}_{end_key}_ohlc_{tf_key}.parquet"
+    bars_df.to_parquet(final_path, index=False)
+
+    duration = time.perf_counter() - total_start
+    logger.info(
+        f"Descarga OHLC {tf_key} para {symbol} completada en {duration:.2f}s "
+        f"({len(bars_df)} registros). Archivo: {final_path}"
+    )
+
+    if remove_intermediate:
+        for path in [raw_dir, tick_dir]:
+            if path.exists():
+                shutil.rmtree(path, ignore_errors=True)
+        logger.info(f"Removed intermediate OHLC directories for {symbol}")
+
+    return final_path

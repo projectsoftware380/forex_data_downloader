@@ -15,7 +15,7 @@ def detect_spikes(df: pd.DataFrame, col: str = "mid", window: int = 60, k: float
 
 def fill_session_flag(df_1m: pd.DataFrame) -> pd.DataFrame:
     # Sesiones simplificadas por hora UTC
-    hour = pd.to_datetime(df_1m["ts_utc_open"], unit="s").dt.hour
+    hour = pd.to_datetime(df_1m["ts_utc_open"], unit="ms").dt.hour
     # 0 Asia(0-7), 1 Londres(7-12), 2 NY(12-20), 3 Overnight(20-24)
     session = pd.cut(hour, bins=[-1,6,11,19,24], labels=[0,1,2,3]).astype(int)
     df_1m["session_flag"] = session
