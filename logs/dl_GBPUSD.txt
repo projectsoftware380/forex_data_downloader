@@ -1,5 +1,0 @@
-2025-10-11 21:39:40 | INFO | forex_data.vendors.dukascopy:download_ticks - Running: C:\Users\Manuel\Documents\forex_data_downloader\.venv311\Scripts\python.exe -m duka GBPUSD -s 2024-01-03 -e 2024-01-04 -f data\raw\ticks\GBPUSD\duka_GBPUSD_20240103_20240104 --header -t 4
-2025-10-11 21:39:40 | WARNING | forex_data.vendors.dukascopy:download_ticks - duka CLI devolvi cdigo 1. Intentar fallback directo.
-2025-10-11 21:39:40 | WARNING | forex_data.vendors.dukascopy:download_ticks - No se pudo extraer ningn tick vlido del CLI. Intentando fallback directo (datafeed.dukascopy.com)
-2025-10-11 21:41:58 | INFO | forex_data.vendors.dukascopy:download_ticks - Fallback OK: 24/24 horas con datos. CSV: data\raw\ticks\GBPUSD\GBPUSD_20240103_20240104_ticks.csv
-2025-10-11 21:41:59 | INFO | __main__:download_ticks - Ticks guardados en Parquet (particionado).

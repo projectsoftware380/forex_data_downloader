@@ -5,10 +5,14 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "forex-data-downloader"
 version = "0.1.0"
-description = "Dukascopy FX data downloader & validator (ticks L1, 1m bars)"
+description = "Data engineering pipeline for Dukascopy ticks, OHLC bars, quality validation, Parquet storage and FastAPI access"
 readme = "README.md"
 requires-python = ">=3.10,<3.13"
-authors = [{name="Manuel"}]
+license = {text = "MIT"}
+authors = [{name = "Manuel Alfonso Rincón Méndez"}]
+
+[project.scripts]
+fxd = "forex_data.cli:app"
 
 [tool.setuptools]
 package-dir = {"" = "src"}
