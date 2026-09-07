@@ -2,25 +2,44 @@
 __pycache__/
 *.py[cod]
 *.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
 dist/
 build/
 
-# Entornos
+# Virtual environments
 .venv/
+.venv*/
 venv/
 env/
 
-# VS Code
-.vscode/
-
-# Datos y logs
-data/
-*.parquet
-*.csv
-*.log
-
-# Credenciales
-
+# Local configuration / secrets
 .env
 .env.*
-.venv311/
+!.env.example
+*.key
+*.pem
+credentials*.json
+
+# IDE / OS
+.vscode/
+.vs/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Generated market data and logs
+data/
+logs/
+*.parquet
+*.csv
+*.bi5
+*.log
+
+# Temporary files
+*.tmp
+.tmp/
+tmp/
